@@ -1,0 +1,151 @@
+---
+
+- name: Debug OS Family Detection
+  debug:
+    msg: "Detected OS Family: {{ ansible_os_family }}, Distribution: {{ ansible_distribution }}, Version: {{ ansible_distribution_version }}"
+
+# Amazon Linux / RHEL-based systems
+- name: Update dnf cache
+  dnf:
+    update_cache: yes
+  when: ansible_os_family == "RedHat"
+
+- name: Ensure systemctl is available
+  dnf:
+    name: /usr/bin/systemctl
+    state: present
+  when: ansible_os_family == "RedHat"
+
+- name: Install required packages (without Docker) - Amazon Linux
+  dnf:
+    name:
+      - wget-1.21.3
+      - vim-enhanced
+      - htop-3.2.1
+      - net-tools-2.0
+      - tree-1.8.0
+      - unzip-6.0
+      - tar-1.34
+      - lvm2-2.03.16
+      - java-17-amazon-corretto-devel
+      - telnet
+      - git-2.50.1
+      - python3-3.9.24
+      - python3-pip-21.3.1
+    state: present
+  when: ansible_os_family == "RedHat"
+
+- name: Install Docker package - Amazon Linux
+  dnf:
+    name: docker-25.0.13
+    state: present
+  register: docker_install_redhat
+  ignore_errors: no
+  when: ansible_os_family == "RedHat"
+
+# Ubuntu / Debian-based systems
+- name: Update apt cache - Ubuntu
+  apt:
+    update_cache: yes
+  when: ansible_os_family == "Debian"
+  changed_when: true
+  register: apt_update_result
+  check_mode: no
+
+- name: Display apt update result
+  debug:
+    var: apt_update_result
+  when: ansible_os_family == "Debian"
+
+- name: Ensure systemctl is available - Ubuntu
+  apt:
+    name: systemd
+    state: present
+  when: ansible_os_family == "Debian"
+
+- name: Install required packages (without Docker) - Ubuntu
+  apt:
+    name:
+      - wget=1.21.4-1ubuntu4.1
+      - vim=2:9.1.0016-1ubuntu7.9
+      - htop=3.3.0-4build1
+      - net-tools=2.10-0.1ubuntu4.4
+      - tree=2.1.1-2ubuntu3.24.04.2
+      - unzip=6.0-28ubuntu4.1
+      - zip=3.0-13ubuntu0.2
+      - tar=1.35+dfsg-3build1
+      - lvm2=2.03.16-3ubuntu3.2
+      - openjdk-17-jdk=17.0.16+8~us1-0ubuntu1~24.04.1
+      - telnet=0.17+2.5-3ubuntu4
+      - git=1:2.43.0-1ubuntu7.3
+      - python3=3.12.3-0ubuntu2.1
+      - python3-pip=24.0+dfsg-1ubuntu1.3
+    state: present
+  when: ansible_os_family == "Debian"
+
+- name: Install Docker package - Ubuntu
+  apt:
+    name: docker.io=28.2.2-0ubuntu1~24.04.1
+    state: present
+  register: docker_install_debian
+  ignore_errors: no
+  when: ansible_os_family == "Debian"
+
+# Set docker_install variable for both OS families
+- name: Set docker_install variable
+  set_fact:
+    docker_install: "{{ docker_install_redhat if ansible_os_family == 'RedHat' else docker_install_debian }}"
+
+- name: Display Docker installation status
+  debug:
+    msg: "Docker installation {{ 'succeeded' if docker_install is succeeded else 'failed - Docker may not be available in the configured repositories' }}"
+
+- name: Check if Docker service exists
+  command: systemctl list-unit-files docker.service
+  register: docker_service_check
+  failed_when: false
+  changed_when: false
+  when: docker_install is succeeded
+
+- name: Start and enable Docker service
+  systemd:
+    name: docker
+    state: started
+    enabled: yes
+    daemon_reload: yes
+  when:
+    - docker_install is succeeded
+    - docker_service_check is defined
+    - docker_service_check.rc is defined
+    - docker_service_check.rc == 0
+  ignore_errors: "{{ ansible_check_mode }}"
+
+- name: Display Docker service status
+  debug:
+    msg: "Docker service is {{ 'available and started' if (docker_install is succeeded and docker_service_check.rc == 0) else 'not available on this system' }}"
+
+- name: Create docker group
+  group:
+    name: docker
+    state: present
+  when: docker_install is succeeded
+  ignore_errors: "{{ ansible_check_mode }}"
+
+- name: Check if docker group exists
+  command: getent group docker
+  register: docker_group_check
+  failed_when: false
+  changed_when: false
+  check_mode: no
+
+- name: Add ec2-user to docker group
+  user:
+    name: ec2-user
+    groups: docker
+    append: yes
+  when:
+    - docker_install is succeeded
+    - docker_service_check.rc is defined
+    - docker_service_check.rc == 0
+    - (docker_group_check.rc == 0 or ansible_check_mode)
+  ignore_errors: "{{ ansible_check_mode }}"

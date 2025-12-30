@@ -1,0 +1,123 @@
+pipeline {
+    agent any
+    environment {
+        ANSIBLE_FORCE_COLOR = 'false'
+        ANSIBLE_NOCOLOR = 'true'
+        DOCKER_IMAGE = 'ansible-server-config'
+        PLAYBOOK = "${PLAYBOOK}"
+        FORCE_REBUILD_IMAGE = "${FORCE_REBUILD_IMAGE}"
+        CHECK_MODE = "${CHECK_MODE}"
+        SSH_CREDENTIAL_ID = "${SSH_CREDENTIAL_ID}"
+        SSH_KEY_PATH = "${WORKSPACE}/.ssh"
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                echo 'Checking out Ansible playbooks from Git...'
+            }
+        }
+
+        stage('Build Ansible Docker Image') {
+            steps {
+                echo 'Building Ansible Docker image...'
+                script {
+                    // Check if the image exists
+                    def imageExists = sh(
+                        script: "docker images -q ${DOCKER_IMAGE}:v1",
+                        returnStdout: true
+                    ).trim()
+
+                    if (params.FORCE_REBUILD_IMAGE) {
+                        echo 'Force rebuild enabled. Building Docker image...'
+                        docker.build("${DOCKER_IMAGE}:v1", "${WORKSPACE}/${SUB_FOLDER}")
+                    } else if (imageExists) {
+                        echo "Docker image ${DOCKER_IMAGE}:v1 already exists. Skipping build."
+                        echo "Use FORCE_REBUILD_IMAGE parameter to rebuild."
+                    } else {
+                        echo 'Building Ansible Docker image...'
+                        docker.build("${DOCKER_IMAGE}:v1", "${WORKSPACE}/${SUB_FOLDER}")
+                    }
+                }
+            }
+        }
+
+        stage('Setup SSH Key') {
+            steps {
+                echo 'Setting up SSH credentials...'
+                script {
+                    // Create SSH directory in workspace
+                    sh "mkdir -p ${SSH_KEY_PATH}"
+                    sh "chmod 700 ${SSH_KEY_PATH}"
+
+                    // Write SSH key from credentials binding
+                    withCredentials([sshUserPrivateKey(
+                        credentialsId: "${params.SSH_CREDENTIAL_ID}",
+                        keyFileVariable: 'SSH_KEY_FILE',
+                        usernameVariable: 'SSH_USER'
+                    )]) {
+                        sh '''
+                            cp $SSH_KEY_FILE ${SSH_KEY_PATH}/${SSH_CREDENTIAL_ID}.pem
+                            cp $SSH_KEY_FILE ${SSH_KEY_PATH}/server-key.pem
+                            chmod 600 ${SSH_KEY_PATH}/${SSH_CREDENTIAL_ID}.pem
+                            chmod 600 ${SSH_KEY_PATH}/server-key.pem
+
+                            cat > ${SSH_KEY_PATH}/config <<EOF
+Host *
+    StrictHostKeyChecking no
+    UserKnownHostsFile=/dev/null
+    IdentityFile /home/ansible/.ssh/id_rsa
+EOF
+                            chmod 600 ${SSH_KEY_PATH}/config
+                        '''
+
+                        // Store SSH username for Ansible
+                        env.ANSIBLE_REMOTE_USER = SSH_USER
+                    }
+                }
+            }
+        }
+
+        stage('Run Ansible Playbook') {
+            steps {
+                echo "Running Ansible playbook: ${params.PLAYBOOK}"
+
+                script {
+                    // Mount workspace and SSH keys into the container
+                    def checkModeFlag = params.CHECK_MODE ? '--check' : ''
+
+                    docker.image("${DOCKER_IMAGE}:v1").inside(
+                        " -v ${WORKSPACE}/${SUB_FOLDER}:/ansible " +
+                        " -v ${SSH_KEY_PATH}:/home/ansible/.ssh:ro " +
+                        " -e ANSIBLE_LOCAL_TEMP=/ansible/.ansible/tmp " +
+                        " -e ANSIBLE_HOME=/home/ansible/.ansible " +
+                        " -e ANSIBLE_FORCE_COLOR=false " +
+                        " -e ANSIBLE_NOCOLOR=true " +
+                        " -e HOME=/home/ansible "
+                    ) {
+                        sh """
+                            ansible-playbook \
+                            -i /ansible/inventory/hosts.yml \
+                            ${checkModeFlag} \
+                            -v \
+                            /ansible/playbooks/${params.PLAYBOOK}
+                        """
+                    }
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            echo 'Ansible playbook executed successfully!'
+        }
+        failure {
+            echo 'Ansible playbook execution failed!'
+        }
+        always {
+            echo 'Cleaning up...'
+            cleanWs()
+        }
+    }
+}

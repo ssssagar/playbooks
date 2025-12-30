@@ -1,0 +1,53 @@
+# Ansible
+*.retry
+.ansible/
+ansible.log
+
+# SSH Keys - NEVER commit these!
+*.pem
+*.key
+id_rsa*
+*.ppk
+
+# Environment and secrets
+.env
+.env.*
+*.secret
+vault-pass.txt
+secrets/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Logs
+*.log
+logs/
+
+# Temporary files
+*.tmp
+.cache/
+tmp/
+
+# Backup files
+*.bak
+*.backup
+*~
+
+# OS
+.DS_Store
+Thumbs.db

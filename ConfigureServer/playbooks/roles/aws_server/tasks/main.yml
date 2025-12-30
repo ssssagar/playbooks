@@ -1,0 +1,15 @@
+---
+
+
+- name: Include package installation tasks
+  include_tasks: packages.yml
+
+- name: Include storage configuration tasks
+  include_tasks: storage.yml
+
+- name: Include user creation tasks
+  include_tasks: create_user.yml
+
+- name: Display completion message
+  debug:
+    msg: "Successfully completed aws_server server configuration"

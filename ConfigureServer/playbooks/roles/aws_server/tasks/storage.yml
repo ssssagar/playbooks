@@ -1,0 +1,236 @@
+---
+
+- name: Ensure Ansible remote_tmp directory exists with proper permissions
+  file:
+    path: /tmp/.ansible-root/tmp
+    state: directory
+    mode: '0755'
+    owner: root
+    group: root
+    recurse: yes
+  changed_when: false
+
+- name: Check if swap file exists
+  stat:
+    path: /swapfile
+  register: swap_file
+
+- name: Create swap file (2GB)
+  command: dd if=/dev/zero of=/swapfile bs=1M count=2048
+  when: not swap_file.stat.exists
+
+- name: Set swap file permissions
+  file:
+    path: /swapfile
+    mode: '0600'
+  when: not swap_file.stat.exists
+  ignore_errors: "{{ ansible_check_mode }}"
+
+- name: Make swap file
+  command: mkswap /swapfile
+  when: not swap_file.stat.exists
+  ignore_errors: "{{ ansible_check_mode }}"
+
+- name: Enable swap file
+  command: swapon /swapfile
+  when: not swap_file.stat.exists
+  ignore_errors: "{{ ansible_check_mode }}"
+
+- name: Add swap to fstab for persistence
+  lineinfile:
+    path: /etc/fstab
+    line: '/swapfile none swap sw 0 0'
+    state: present
+  when: not swap_file.stat.exists
+
+- name: Verify swap is active
+  command: swapon --show
+  register: swap_status
+  changed_when: false
+
+- name: Display swap status
+  debug:
+    msg: "{{ swap_status.stdout }}"
+
+- name: Check if /tmp is mounted as tmpfs
+  shell: mount | grep 'tmpfs on /tmp'
+  register: tmp_tmpfs_check
+  failed_when: false
+  changed_when: false
+
+- name: Check current /tmp size
+  shell: df -BG /tmp | awk 'NR==2 {print $2}' | sed 's/G//'
+  register: tmp_current_size
+  failed_when: false
+  changed_when: false
+
+- name: Update /etc/fstab for persistent /tmp size (5GB) - Amazon Linux
+  lineinfile:
+    path: /etc/fstab
+    regexp: '^tmpfs\s+/tmp'
+    line: 'tmpfs /tmp tmpfs defaults,size=5G,mode=1777 0 0'
+    state: present
+  register: fstab_updated_redhat
+  when: ansible_os_family == "RedHat"
+
+- name: Update /etc/fstab for persistent /tmp size (5GB) - Ubuntu
+  lineinfile:
+    path: /etc/fstab
+    regexp: '^tmpfs\s+/tmp'
+    line: 'tmpfs /tmp tmpfs defaults,size=5G,mode=1777 0 0'
+    state: present
+  register: fstab_updated_debian
+  when: ansible_os_family == "Debian"
+
+- name: Mount /tmp as tmpfs if not already mounted - Ubuntu
+  shell: mount -t tmpfs -o defaults,size=5G,mode=1777 tmpfs /tmp
+  when:
+    - ansible_os_family == "Debian"
+    - tmp_tmpfs_check.rc != 0
+  changed_when: true
+  ignore_errors: yes
+
+- name: Remount /tmp with 5GB size - Amazon Linux
+  command: mount -o remount,size=5G /tmp
+  when:
+    - ansible_os_family == "RedHat"
+    - tmp_tmpfs_check.rc == 0
+    - fstab_updated_redhat.changed or (tmp_current_size.stdout | default('0') | int) < 5
+  changed_when: true
+  ignore_errors: yes
+
+- name: Remount /tmp with 5GB size - Ubuntu (if already tmpfs)
+  command: mount -o remount,size=5G /tmp
+  when:
+    - ansible_os_family == "Debian"
+    - tmp_tmpfs_check.rc == 0
+    - fstab_updated_debian.changed or (tmp_current_size.stdout | default('0') | int) < 5
+  changed_when: true
+  ignore_errors: yes
+
+- name: Verify /tmp size
+  command: df -h /tmp
+  register: tmp_status
+  changed_when: false
+
+- name: Display /tmp status
+  debug:
+    msg: "{{ tmp_status.stdout }}"
+
+- name: Detect EBS volume device name
+  shell: |
+    # Check for NVMe devices (Nitro instances)
+    if [ -b "/dev/nvme1n1" ]; then
+      echo "nvme1n1"
+    # Check for traditional block devices (older instances)
+    elif [ -b "/dev/xvdb" ]; then
+      echo "xvdb"
+    elif [ -b "/dev/xvdf" ]; then
+      echo "xvdf"
+    elif [ -b "/dev/xvdg" ]; then
+      echo "xvdg"
+    else
+      echo "NOT_FOUND"
+    fi
+  register: detected_device
+  changed_when: false
+  when: ebs_device is not defined
+
+- name: Set EBS device from detection or user variable
+  set_fact:
+    actual_ebs_device: "{{ ebs_device | default(detected_device.stdout) }}"
+
+- name: Display EBS volume detection status
+  debug:
+    msg: "EBS volume device: {{ actual_ebs_device }} - {{ 'Found' if actual_ebs_device != 'NOT_FOUND' else 'NOT attached' }}"
+
+- name: Check if physical volume exists
+  command: pvdisplay /dev/{{ actual_ebs_device }}
+  register: pv_check
+  failed_when: false
+  changed_when: false
+  when: actual_ebs_device != 'NOT_FOUND'
+
+- name: Create physical volume
+  command: pvcreate /dev/{{ actual_ebs_device }}
+  when:
+    - actual_ebs_device != 'NOT_FOUND'
+    - pv_check.rc != 0
+
+- name: Check if volume group exists
+  command: vgdisplay {{ vg_name | default('data_vg') }}
+  register: vg_check
+  failed_when: false
+  changed_when: false
+  when: actual_ebs_device != 'NOT_FOUND'
+
+- name: Create volume group
+  command: vgcreate {{ vg_name | default('data_vg') }} /dev/{{ actual_ebs_device }}
+  when:
+    - actual_ebs_device != 'NOT_FOUND'
+    - vg_check.rc != 0
+
+- name: Check if logical volume exists
+  command: lvdisplay /dev/{{ vg_name | default('data_vg') }}/{{ lv_name | default('data_lv') }}
+  register: lv_check
+  failed_when: false
+  changed_when: false
+  when: actual_ebs_device != 'NOT_FOUND'
+
+- name: Create logical volume (use 100% of VG)
+  command: lvcreate -l 100%FREE -n {{ lv_name | default('data_lv') }} {{ vg_name | default('data_vg') }}
+  when:
+    - actual_ebs_device != 'NOT_FOUND'
+    - lv_check.rc != 0
+
+- name: Check if filesystem exists on logical volume
+  command: blkid /dev/{{ vg_name | default('data_vg') }}/{{ lv_name | default('data_lv') }}
+  register: fs_check
+  failed_when: false
+  changed_when: false
+  when: actual_ebs_device != 'NOT_FOUND'
+
+- name: Create filesystem on logical volume
+  filesystem:
+    fstype: "{{ fs_type | default('ext4') }}"
+    dev: /dev/{{ vg_name | default('data_vg') }}/{{ lv_name | default('data_lv') }}
+  when:
+    - actual_ebs_device != 'NOT_FOUND'
+    - fs_check.rc != 0
+
+- name: Create mount point directory
+  file:
+    path: "{{ mount_point | default('/data') }}"
+    state: directory
+    mode: '0755'
+  when: actual_ebs_device != 'NOT_FOUND'
+
+- name: Mount logical volume
+  mount:
+    path: "{{ mount_point | default('/data') }}"
+    src: /dev/{{ vg_name | default('data_vg') }}/{{ lv_name | default('data_lv') }}
+    fstype: "{{ fs_type | default('ext4') }}"
+    state: mounted
+  when: actual_ebs_device != 'NOT_FOUND'
+
+- name: Add to /etc/fstab for persistence
+  mount:
+    path: "{{ mount_point | default('/data') }}"
+    src: /dev/{{ vg_name | default('data_vg') }}/{{ lv_name | default('data_lv') }}
+    fstype: "{{ fs_type | default('ext4') }}"
+    opts: defaults
+    state: present
+  when: actual_ebs_device != 'NOT_FOUND'
+
+- name: Verify LVM setup
+  command: df -h {{ mount_point | default('/data') }}
+  register: lvm_status
+  changed_when: false
+  when: actual_ebs_device != 'NOT_FOUND'
+
+- name: Display LVM mount status
+  debug:
+    msg: "{{ lvm_status.stdout }}"
+  when:
+    - actual_ebs_device != 'NOT_FOUND'
+    - lvm_status is defined

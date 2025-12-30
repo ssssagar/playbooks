@@ -1,0 +1,99 @@
+---
+- name: Set linux users variable
+  set_fact:
+    linux_users:
+      - username: "poweruser"
+        user_home: "/home/poweruser"
+        user_shell: "/bin/bash"
+        user_groups: ["docker"]
+        ssh_public_key: "ssh-rsa AAhkshakskajskjAABJHHIDIUDDD1jkljsakljDHDHHDAHSKHcccakslaks0KDHKHKAHDKHADKccccasasassaeqwjkjka7989781n219719/skalksAS2198JNAJS+ReKRqdYQMfM27vdLfnjDPTYxif5ZaC8Q+MBqtbyZ2iV1F4xy2XNoxp9PXY0fHdBUI7rni5DGSUj7kVE5xI7QJvrJa/3 VPNnew"
+  tags:
+    - user
+    - create-user
+
+- name: Create users with custom home directory
+  ansible.builtin.user:
+    name: "{{ user.username }}"
+    home: "{{ user.user_home }}"
+    shell: "{{ user.user_shell | default('/bin/bash') }}"
+    create_home: yes
+    groups: "{{ user.user_groups | default([]) }}"
+    append: yes
+    state: present
+  loop: "{{ linux_users }}"
+  loop_control:
+    loop_var: user
+  tags:
+    - user
+    - create-user
+
+- name: Set user password (optional)
+  ansible.builtin.user:
+    name: "{{ user.username }}"
+    password: "{{ user.user_password | password_hash('sha512') }}"
+    update_password: on_create
+  loop: "{{ linux_users }}"
+  loop_control:
+    loop_var: user
+  when:
+    - user.user_password is defined
+    - user.user_password | length > 0
+  tags:
+    - user
+    - password
+
+- name: Ensure .ssh directory exists
+  ansible.builtin.file:
+    path: "{{ user.user_home }}/.ssh"
+    state: directory
+    owner: "{{ user.username }}"
+    group: "{{ user.username }}"
+    mode: '0700'
+  loop: "{{ linux_users }}"
+  loop_control:
+    loop_var: user
+  ignore_errors: "{{ ansible_check_mode }}"
+  tags:
+    - user
+    - ssh
+
+- name: Add SSH public key to authorized_keys
+  ansible.builtin.authorized_key:
+    user: "{{ user.username }}"
+    key: "{{ user.ssh_public_key }}"
+    state: present
+    exclusive: no
+  loop: "{{ linux_users }}"
+  loop_control:
+    loop_var: user
+  when: user.ssh_public_key is defined
+  ignore_errors: "{{ ansible_check_mode }}"
+  tags:
+    - user
+    - ssh
+
+- name: Ensure proper ownership of home directory
+  ansible.builtin.file:
+    path: "{{ user.user_home }}"
+    owner: "{{ user.username }}"
+    group: "{{ user.username }}"
+    recurse: yes
+    state: directory
+  loop: "{{ linux_users }}"
+  loop_control:
+    loop_var: user
+  ignore_errors: "{{ ansible_check_mode }}"
+  tags:
+    - user
+
+- name: Display user creation info
+  ansible.builtin.debug:
+    msg:
+      - "User {{ user.username }} created successfully"
+      - "Home directory: {{ user.user_home }}"
+      - "SSH key configured: {{ 'Yes' if user.ssh_public_key is defined else 'No' }}"
+  loop: "{{ linux_users }}"
+  loop_control:
+    loop_var: user
+  tags:
+    - user

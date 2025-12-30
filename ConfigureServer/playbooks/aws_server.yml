@@ -1,0 +1,12 @@
+---
+- name: Configure aws_server
+  hosts: aws_server
+  become: yes
+  gather_facts: yes
+
+  tasks:
+    - name: Include roles dynamically from inventory
+      include_role:
+        name: "{{ item }}"
+      loop: "{{ host_roles | default([]) }}"
+      when: host_roles is defined and host_roles | length > 0
